@@ -1,6 +1,6 @@
 /***********************************************************************
  *
- * Copyright (C) 2008, 2009, 2010, 2011, 2012, 2013, 2014 Graeme Gott <graeme@gottcode.org>
+ * Copyright (C) 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2016 Graeme Gott <graeme@gottcode.org>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -68,34 +68,6 @@ namespace
 		area->setPalette(p);
 
 		return area;
-	}
-
-	bool recursivelyRemove(const QString& path)
-	{
-		// Abort early if directory doesn't exist
-		QDir dir(path);
-		if (!dir.exists()) {
-			return true;
-		}
-
-		// Remove subdirectories
-		QStringList contents = dir.entryList(QDir::NoDotAndDotDot | QDir::Dirs | QDir::Hidden | QDir::System);
-		for (const QString& entry : contents) {
-			if (!recursivelyRemove(dir.absoluteFilePath(entry))) {
-				return false;
-			}
-		}
-
-		// Remove all files
-		contents = dir.entryList(QDir::Files | QDir::Hidden | QDir::System);
-		for (const QString& entry : contents) {
-			if (!QFile::remove(dir.absoluteFilePath(entry))) {
-				return false;
-			}
-		}
-
-		// Remove directory
-		return dir.rmdir(path);
 	}
 }
 
@@ -336,16 +308,16 @@ void PreferencesDialog::accept()
 
 	ActionManager::instance()->setShortcuts(m_new_shortcuts);
 
+	// Uninstall languages
+	for (const QString& language : m_uninstalled) {
+		QFile::remove("dict:" + language + ".aff");
+		QFile::remove("dict:" + language + ".dic");
+	}
+
 	// Install languages
 	QString path = DictionaryManager::path() + "/install/";
 	QString new_path = DictionaryManager::installedPath() + "/";
 	QDir dir(path);
-#ifdef Q_OS_WIN
-	QStringList dirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-	for (const QString& file : dirs) {
-		QFile::rename(path + file, new_path + file);
-	}
-#endif
 	QStringList files = dir.entryList(QDir::Files);
 	for (const QString& file : files) {
 		QFile::remove(new_path + file);
@@ -380,7 +352,7 @@ void PreferencesDialog::accept()
 
 void PreferencesDialog::reject()
 {
-	if (!recursivelyRemove(DictionaryManager::path() + "/install/")) {
+	if (!QDir(DictionaryManager::path() + "/install/").removeRecursively()) {
 		qWarning("Failed to clean up dictionary install path");
 	}
 	QDialog::reject();
@@ -484,27 +456,8 @@ void PreferencesDialog::addLanguage()
 			aff_files += name;
 		} else if (name.endsWith(".dic")) {
 			dic_files += name;
-#ifdef Q_OS_WIN
-		// Find Voikko files
-		} else if (name.contains("mor-") || (name == "libvoikko-1.dll")) {
-			files += name;
-#endif
 		}
 	}
-
-#ifdef Q_OS_WIN
-	// Find Voikko dictionaries
-	for (const QString& file : files) {
-		if (file.endsWith(".dll")) {
-			continue;
-		}
-		QString name = file.section('/', -1).section('.', 0);
-		name.replace("voikko-", "");
-		if (!dictionaries.contains(name)) {
-			dictionaries += name;
-		}
-	}
-#endif
 
 	// Find Hunspell dictionary files
 	for (const QString& dic : dic_files) {
@@ -526,21 +479,10 @@ void PreferencesDialog::addLanguage()
 		dir.mkdir("install");
 		QString install = dir.absoluteFilePath("install") + "/";
 		for (const QString& file : files) {
+			// Ignore path for Hunspell dictionaries
 			QString filename = file;
-			if (filename.endsWith(".dic") || filename.endsWith(".aff")) {
-				// Ignore path for Hunspell dictionaries
-				filename = filename.section('/', -1);
-				filename.replace(QChar('-'), QChar('_'));
-#ifdef Q_OS_WIN
-			} else if (filename.endsWith(".dll")) {
-				// Ignore path for Voikko library
-				dir.setPath(install);
-			} else {
-				// Create path for Voikko dictionary
-				dir.setPath(install + filename + "/..");
-				dir.mkpath(dir.absolutePath());
-#endif
-			}
+			filename = filename.section('/', -1);
+			filename.replace(QChar('-'), QChar('_'));
 
 			QFile out(install + filename);
 			if (out.open(QIODevice::WriteOnly)) {
@@ -562,7 +504,7 @@ void PreferencesDialog::addLanguage()
 			QString new_aff_file = dictionary_new_path + language + ".aff";
 			QString new_dic_file = dictionary_new_path + language + ".dic";
 
-			if ((QFile::exists(new_aff_file) || QFile::exists(new_dic_file))) {
+			if (!m_uninstalled.contains(language) && (QFile::exists(new_aff_file) || QFile::exists(new_dic_file))) {
 				if (QMessageBox::question(this, tr("Question"), tr("The dictionary \"%1\" already exists. Do you want to replace it?").arg(name), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::No) {
 					QFile::remove(aff_file);
 					QFile::remove(dic_file);
@@ -580,6 +522,30 @@ void PreferencesDialog::addLanguage()
 
 	// Close archive
 	zip.close();
+}
+
+//-----------------------------------------------------------------------------
+
+void PreferencesDialog::removeLanguage()
+{
+	int index = m_languages->currentIndex();
+	if (index == -1) {
+		return;
+	}
+	if (QMessageBox::question(this, tr("Question"), tr("Remove current dictionary?"), QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) {
+		m_uninstalled.append(m_languages->itemData(index).toString());
+		m_languages->removeItem(index);
+	}
+}
+
+//-----------------------------------------------------------------------------
+
+void PreferencesDialog::selectedLanguageChanged(int index)
+{
+	if (index != -1) {
+		QFileInfo info("dict:" + m_languages->itemData(index).toString() + ".dic");
+		m_remove_language_button->setEnabled(info.canonicalFilePath().startsWith(DictionaryManager::installedPath()));
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -782,7 +748,7 @@ QWidget* PreferencesDialog::initGeneralTab()
 	save_layout->addLayout(save_format_layout);
 
 	// Create view options
-	QGroupBox* view_group = new QGroupBox(tr("View"), tab);
+	QGroupBox* view_group = new QGroupBox(tr("User Interface"), tab);
 
 	m_always_show_scrollbar = new QCheckBox(tr("Always show scrollbar"), view_group);
 	m_always_show_header = new QCheckBox(tr("Always show top bar"), view_group);
@@ -995,10 +961,14 @@ QWidget* PreferencesDialog::initSpellingTab()
 	QGroupBox* languages_group = new QGroupBox(tr("Language"), tab);
 
 	m_languages = new QComboBox(languages_group);
+	connect(m_languages, SIGNAL(currentIndexChanged(int)), this, SLOT(selectedLanguageChanged(int)));
 
 	m_add_language_button = new QPushButton(tr("Add"), languages_group);
 	m_add_language_button->setAutoDefault(false);
 	connect(m_add_language_button, SIGNAL(clicked()), this, SLOT(addLanguage()));
+	m_remove_language_button = new QPushButton(tr("Remove"), languages_group);
+	m_remove_language_button->setAutoDefault(false);
+	connect(m_remove_language_button, SIGNAL(clicked()), this, SLOT(removeLanguage()));
 
 	QStringList languages = DictionaryManager::instance().availableDictionaries();
 	for (const QString& language : languages) {
@@ -1010,6 +980,7 @@ QWidget* PreferencesDialog::initSpellingTab()
 	QHBoxLayout* languages_layout = new QHBoxLayout(languages_group);
 	languages_layout->addWidget(m_languages, 1);
 	languages_layout->addWidget(m_add_language_button);
+	languages_layout->addWidget(m_remove_language_button);
 
 	// Read personal dictionary
 	QGroupBox* personal_dictionary_group = new QGroupBox(tr("Personal Dictionary"), tab);
